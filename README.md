@@ -1,2 +1,2 @@
 # tiny-timmy
-Small Vision Models
+Small Vision Model
