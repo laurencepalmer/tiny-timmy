@@ -5,19 +5,30 @@ from torch.utils.data import DataLoader, random_split
 from torchvision import datasets, transforms
 import matplotlib.pyplot as plt
 import os
+import random
 
 from model.model import Encoder
 
+
+def set_seed(seed=42):
+    """Set seed for reproducibility."""
+    random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
 # Training configuration
 CONFIG = {
-    'dataset': 'cifar100',  # 'cifar10' or 'cifar100'
-    'batch_size': 128,
-    'epochs': 200,
+    'dataset': 'cifar100',
+    'batch_size': 256,
+    'epochs': 300,
     'learning_rate': 0.001,
     'weight_decay': 5e-4,
     'label_smoothing': 0.1,
+    'warmup_epochs': 10,
     'early_stopping_patience': 20,
-    'val_split': 0.1,  # fraction of training data for validation
+    'val_split': 0.1,
     'device': 'cuda' if torch.cuda.is_available() else 'cpu',
     'num_workers': 2,
     'save_dir': './outputs'
@@ -25,11 +36,11 @@ CONFIG = {
 
 # Model configuration (maps to Encoder arguments)
 MODEL_CONFIG = {
-    'n_blocks': 4,
-    'kernel_sizes': [5, 5, 3, 3],
-    'channels': [3, 32, 64, 128, 256],  # n_blocks + 1 values (in -> out for each block)
-    'paddings': [2, 2, 1, 1],
-    'ratios': [4, 4, 4, 4],  # channel attention reduction ratios
+    'n_blocks': 8,
+    'channels': [16, 16, 16, 32, 32, 64, 64, 128, 128],
+    'strides': [1, 1, 2, 1, 2, 1, 2, 1],
+    'expand_ratio': 2,
+    'drop_path_rate': 0.1,
 }
 
 
@@ -183,6 +194,7 @@ def plot_metrics(train_losses, val_losses, test_losses, train_accs, val_accs, te
 
 
 def main():
+    set_seed(42)
     config = CONFIG
     device = config['device']
     print(f"Using device: {device}")
@@ -198,22 +210,36 @@ def main():
     # Model
     model = Encoder(
         n_blocks=MODEL_CONFIG['n_blocks'],
-        kernel_sizes=MODEL_CONFIG['kernel_sizes'],
         channels=MODEL_CONFIG['channels'],
-        paddings=MODEL_CONFIG['paddings'],
-        ratios=MODEL_CONFIG['ratios'],
+        strides=MODEL_CONFIG['strides'],
+        expand_ratio=MODEL_CONFIG['expand_ratio'],
+        drop_path_rate=MODEL_CONFIG['drop_path_rate'],
         n_classes=num_classes
     ).to(device)
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
 
     # Loss and optimizer
     criterion = nn.CrossEntropyLoss(label_smoothing=config['label_smoothing'])
-    optimizer = optim.Adam(
+    optimizer = optim.AdamW(
         model.parameters(),
         lr=config['learning_rate'],
         weight_decay=config['weight_decay']
     )
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config['epochs'])
+    warmup_scheduler = optim.lr_scheduler.LinearLR(
+        optimizer,
+        start_factor=0.1,
+        end_factor=1.0,
+        total_iters=config['warmup_epochs']
+    )
+    cosine_scheduler = optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=config['epochs'] - config['warmup_epochs']
+    )
+    scheduler = optim.lr_scheduler.SequentialLR(
+        optimizer,
+        schedulers=[warmup_scheduler, cosine_scheduler],
+        milestones=[config['warmup_epochs']]
+    )
 
     # Tracking
     train_losses, val_losses, test_losses = [], [], []
